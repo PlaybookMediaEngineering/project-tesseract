@@ -51,7 +51,7 @@ const SlideTabs = () => {
 			<Tab setPosition={setPosition}>
 				<Link
 					className="w-full h-full"
-					href={"https://github.com/Dhravya/supermemory/graphs/contributors"}
+					href={"https://github.com/PlaybookMediaEngineering/project-tesseract/graphs/contributors"}
 				>
 					Team
 				</Link>

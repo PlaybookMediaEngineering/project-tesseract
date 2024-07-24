@@ -7,6 +7,7 @@ import gradientStyle from "./_components/TextGradient/gradient.module.css";
 import { cn } from "@repo/ui/lib/utils";
 import { redirect } from "next/navigation";
 import { toast } from "sonner";
+import { siteConfig } from "@/config/app";
 
 export const runtime = "edge";
 
@@ -30,7 +31,7 @@ async function Signin({
 						alt="SuperMemory logo"
 						className="hover:brightness-125 duration-200"
 					/>
-					<span className="text-xl">supermemory.ai</span>
+					<span className="text-xl">{siteConfig.name}</span>
 				</div>
 				<div className="absolute  inset-0 opacity-5  w-full  bg-transparent  bg-[linear-gradient(to_right,#f0f0f0_1px,transparent_1px),linear-gradient(to_bottom,#f0f0f0_1px,transparent_1px)] bg-[size:6rem_4rem] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_0%,#000_70%,transparent_110%)]"></div>
 				<img
