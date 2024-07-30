@@ -24,6 +24,7 @@ import { redirect } from "next/navigation";
 import { tweetToMd } from "@repo/shared-types/utils";
 import { ensureAuth } from "../api/ensureAuth";
 import { getRandomSentences } from "@/lib/utils";
+import { getRequestContext } from "@cloudflare/next-on-pages";
 
 export const completeOnboarding = async (): ServerActionReturnType<boolean> => {
 	const data = await auth();
@@ -35,10 +36,10 @@ export const completeOnboarding = async (): ServerActionReturnType<boolean> => {
 
 	try {
 		const res = await db
-		.update(users)
-		.set({ hasOnboarded: true })
-		.where(eq(users.id, data.user.id))
-		.returning({ hasOnboarded: users.hasOnboarded });
+			.update(users)
+			.set({ hasOnboarded: true })
+			.where(eq(users.id, data.user.id))
+			.returning({ hasOnboarded: users.hasOnboarded });
 
 		if (res.length === 0 || !res[0]?.hasOnboarded) {
 			return { success: false, data: false, error: "Failed to update user" };
@@ -48,9 +49,7 @@ export const completeOnboarding = async (): ServerActionReturnType<boolean> => {
 	} catch (e) {
 		return { success: false, data: false, error: (e as Error).message };
 	}
-
-
-}
+};
 
 export const createSpace = async (
 	input: string | FormData,
@@ -89,14 +88,16 @@ export const createSpace = async (
 	}
 };
 
-const typeDecider = (content: string) => {
+const typeDecider = (content: string): "page" | "tweet" | "note" => {
 	// if the content is a URL, then it's a page. if its a URL with https://x.com/user/status/123, then it's a tweet. else, it's a note.
 	// do strict checking with regex
 	if (content.match(/https?:\/\/(x\.com|twitter\.com)\/[\w]+\/[\w]+\/[\d]+/)) {
 		return "tweet";
-	} else if (content.match(/https?:\/\/[\w\.]+/)) {
-		return "page";
-	} else if (content.match(/https?:\/\/www\.[\w\.]+/)) {
+	} else if (
+		content.match(
+			/^(https?:\/\/)?(www\.)?[a-z0-9]+([-.]{1}[a-z0-9]+)*\.[a-z]{2,5}(\/.*)?$/i,
+		)
+	) {
 		return "page";
 	} else {
 		return "note";
@@ -200,6 +201,7 @@ export const createMemory = async (input: {
 
 	let pageContent = input.content;
 	let metadata: Awaited<ReturnType<typeof getMetaData>>;
+	let vectorData: string;
 
 	if (!(await limit(data.user.id, type))) {
 		return {
@@ -218,7 +220,7 @@ export const createMemory = async (input: {
 			},
 		});
 		pageContent = await response.text();
-
+		vectorData = pageContent;
 		try {
 			metadata = await getMetaData(input.content);
 		} catch (e) {
@@ -228,8 +230,47 @@ export const createMemory = async (input: {
 			};
 		}
 	} else if (type === "tweet") {
+		//Request the worker for the entire thread
+
+		let thread: string;
+		let errorOccurred: boolean = false;
+
+		try {
+			const cf_thread_endpoint = process.env.THREAD_CF_WORKER;
+			const authKey = process.env.THREAD_CF_AUTH;
+			const threadRequest = await fetch(cf_thread_endpoint, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: authKey,
+				},
+				body: JSON.stringify({ url: input.content }),
+			});
+
+			if (threadRequest.status !== 200) {
+				throw new Error(
+					`Failed to fetch the thread: ${input.content}, Reason: ${threadRequest.statusText}`,
+				);
+			}
+
+			thread = await threadRequest.text();
+			if (thread.trim().length === 2) {
+				console.log("Thread is an empty array");
+				throw new Error(
+					"[THREAD FETCHING SERVICE] Got no content form thread worker",
+				);
+			}
+		} catch (e) {
+			console.log("[THREAD FETCHING SERVICE] Failed to fetch the thread", e);
+			errorOccurred = true;
+		}
+
 		const tweet = await getTweetData(input.content.split("/").pop() as string);
+
 		pageContent = tweetToMd(tweet);
+		console.log("THis ishte page content!!", pageContent);
+		//@ts-ignore
+		vectorData = errorOccurred ? JSON.stringify(pageContent) : thread;
 		metadata = {
 			baseUrl: input.content,
 			description: tweet.text.slice(0, 200),
@@ -238,6 +279,7 @@ export const createMemory = async (input: {
 		};
 	} else if (type === "note") {
 		pageContent = input.content;
+		vectorData = pageContent;
 		noteId = new Date().getTime();
 		metadata = {
 			baseUrl: `https://supermemory.ai/note/${noteId}`,
@@ -264,7 +306,7 @@ export const createMemory = async (input: {
 		{
 			method: "POST",
 			body: JSON.stringify({
-				pageContent,
+				pageContent: vectorData,
 				title: metadata.title,
 				description: metadata.description,
 				url: metadata.baseUrl,
@@ -289,7 +331,7 @@ export const createMemory = async (input: {
 		};
 	}
 
-	let contentId: number | undefined;
+	let contentId: number;
 
 	const response = (await vectorSaveResponse.json()) as {
 		status: string;
@@ -346,6 +388,14 @@ export const createMemory = async (input: {
 		revalidatePath("/memories");
 		revalidatePath("/home");
 
+		if (!insertResponse[0]?.id) {
+			return {
+				success: false,
+				data: 0,
+				error: "Something went wrong while saving the document to the database",
+			};
+		}
+
 		contentId = insertResponse[0]?.id;
 	} catch (e) {
 		const error = e as Error;
@@ -367,14 +417,6 @@ export const createMemory = async (input: {
 			success: false,
 			data: 0,
 			error: "Failed to save to database with error: " + error.message,
-		};
-	}
-
-	if (!contentId) {
-		return {
-			success: false,
-			data: 0,
-			error: "Something went wrong while saving the document to the database",
 		};
 	}
 
@@ -461,6 +503,7 @@ export const createChatObject = async (
 		answer: lastChat.answer.parts.map((part) => part.text).join(""),
 		answerSources: JSON.stringify(lastChat.answer.sources),
 		threadId,
+		createdAt: new Date(),
 	});
 
 	if (!saved) {
@@ -649,7 +692,7 @@ export const createCanvas = async () => {
 		.insert(canvas)
 		.values({ userId: data.user.id })
 		.returning({ id: canvas.id });
-	redirect(`/canvas/${resp[0]!.id}`);
+	redirect(`/thinkpad/${resp[0]!.id}`);
 	// TODO INVESTIGATE: NO REDIRECT INSIDE TRY CATCH BLOCK
 	// try {
 	//   const resp = await db
@@ -746,99 +789,113 @@ export async function getQuerySuggestions() {
 		return { error: "Not authenticated", success: false };
 	}
 
-	const recommendations = await process.env.RECOMMENDATIONS.get(data.user.id);
+	const { env } = getRequestContext();
 
-	if (recommendations) {
-		return {
-			success: true,
-			data: JSON.parse(recommendations),
+	try {
+		const recommendations = await env.RECOMMENDATIONS.get(data.user.id);
+
+		if (recommendations) {
+			return {
+				success: true,
+				data: JSON.parse(recommendations),
+			};
+		}
+
+		// Randomly choose some storedContent of the user.
+		const content = await db
+			.select()
+			.from(storedContent)
+			.where(eq(storedContent.userId, data.user.id))
+			.orderBy(sql`random()`)
+			.limit(5)
+			.all();
+
+		if (content.length === 0) {
+			return {
+				success: true,
+				data: [],
+			};
+		}
+
+		const fullQuery = content
+			.map((c) => `${c.title} \n\n${c.content}`)
+			.join(" ");
+
+		const suggestionsCall = (await env.AI.run(
+			// @ts-ignore
+			"@cf/meta/llama-3.1-8b-instruct",
+			{
+				messages: [
+					{
+						role: "system",
+						content: `You are a model that suggests questions based on the user's content. you MUST suggest atleast 1 question to ask. AT MAX, create 3 suggestions. not more than that.`,
+					},
+					{
+						role: "user",
+						content: `Run the function based on this input: ${fullQuery.slice(0, 2000)}`,
+					},
+				],
+				tools: [
+					{
+						type: "function",
+						function: {
+							name: "querySuggestions",
+							description:
+								"Take the user's content to suggest some good questions that they could ask.",
+							parameters: {
+								type: "object",
+								properties: {
+									querySuggestions: {
+										type: "array",
+										description:
+											"Short questions that the user can ask. Give atleast 3 suggestions. No more than 5.",
+										items: {
+											type: "string",
+										},
+									},
+								},
+								required: ["querySuggestions"],
+							},
+						},
+					},
+				],
+			},
+		)) as {
+			response: string;
+			tool_calls: { name: string; arguments: { querySuggestions: string[] } }[];
 		};
-	}
 
-	// Randomly choose some storedContent of the user.
-	const content = await db
-		.select()
-		.from(storedContent)
-		.where(eq(storedContent.userId, data.user.id))
-		.orderBy(sql`random()`)
-		.limit(5)
-		.all();
+		console.log(
+			"I RAN AN AI CALLS OWOWOWOWOW",
+			JSON.stringify(suggestionsCall, null, 2),
+		);
 
-	if (content.length === 0) {
+		const suggestions =
+			suggestionsCall.tool_calls?.[0]?.arguments?.querySuggestions;
+
+		if (!suggestions || suggestions.length === 0) {
+			return {
+				success: false,
+				error: "Failed to get query suggestions",
+			};
+		}
+
+		if (suggestions.length > 0) {
+			await env.RECOMMENDATIONS.put(data.user.id, JSON.stringify(suggestions), {
+				expirationTtl: 60 * 2,
+			});
+		}
+
 		return {
 			success: true,
+			data: suggestions,
+		};
+	} catch (exception) {
+		const error = exception as Error;
+		return {
+			success: false,
+			error: error.message,
 			data: [],
 		};
 	}
-
-	const fullQuery = content.map((c) => `${c.title} \n\n${c.content}`).join(" ");
-
-	const sentences = getRandomSentences(fullQuery);
-
-	const suggestionsCall = (await process.env.AI.run(
-		// @ts-ignore
-		"@cf/meta/llama-3.1-8b-instruct",
-		{
-			messages: [
-				{
-					role: "system",
-					content: `You are a model that suggests questions based on the user's content.`,
-				},
-				{
-					role: "user",
-					content: `Run the function based on this input: ${sentences}`,
-				},
-			],
-			tools: [
-				{
-					type: "function",
-					function: {
-						name: "querySuggestions",
-						description:
-							"Take the user's content to suggest some good questions that they could ask.",
-						parameters: {
-							type: "object",
-							properties: {
-								querySuggestions: {
-									type: "array",
-									description:
-										"Short questions that the user can ask. Give atleast 3 suggestions. No more than 5.",
-									items: {
-										type: "string",
-									},
-								},
-							},
-							required: ["querySuggestions"],
-						},
-					},
-				},
-			],
-		},
-	)) as {
-		response: string;
-		tool_calls: { name: string; arguments: { querySuggestions: string[] } }[];
-	};
-
-	const suggestions =
-		suggestionsCall.tool_calls?.[0]?.arguments?.querySuggestions;
-
-	if (!suggestions || suggestions.length === 0) {
-		return {
-			success: false,
-			error: "Failed to get query suggestions",
-		};
-	}
-
-	await process.env.RECOMMENDATIONS.put(
-		data.user.id,
-		JSON.stringify(suggestions),
-		{
-			expirationTtl: 60 * 5,
-		},
-	);
-
-	return {
-		success: true,
-		data: suggestions,
-	};
 }
