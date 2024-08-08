@@ -1,22 +1,22 @@
 import { z } from "zod";
 import { db } from "@/server/db";
-import { contentToSpace, space, storedContent } from "@/server/db/schema";
+import { contentToSpace, space, storedContent } from "@repo/db/schema";
 import { and, eq, inArray } from "drizzle-orm";
-import { LIMITS } from "@/lib/constants";
-import { limit } from "@/app/actions/doers";
+// import { LIMITS } from "@repo/shared-types";
+// import { limit } from "@/app/actions/doers";
 import { type AddFromAPIType } from "@repo/shared-types";
 
 export const createMemoryFromAPI = async (input: {
 	data: AddFromAPIType;
 	userId: string;
 }) => {
-	if (!(await limit(input.userId, input.data.type))) {
-		return {
-			success: false,
-			data: 0,
-			error: `You have exceeded the limit of ${LIMITS[input.data.type as keyof typeof LIMITS]} ${input.data.type}s.`,
-		};
-	}
+	// if (!(await limit(input.userId, input.data.type))) {
+	// 	return {
+	// 		success: false,
+	// 		data: 0,
+	// 		error: `You have exceeded the limit of ${LIMITS[input.data.type as keyof typeof LIMITS]} ${input.data.type}s.`,
+	// 	};
+	// }
 
 	const vectorSaveResponse = await fetch(
 		`${process.env.BACKEND_BASE_URL}/api/add`,
@@ -24,8 +24,8 @@ export const createMemoryFromAPI = async (input: {
 			method: "POST",
 			body: JSON.stringify({
 				pageContent: input.data.pageContent,
-				title: input.data.title,
-				description: input.data.description,
+				title: input.data.title.slice(0, 500),
+				description: input.data.description.slice(0, 500),
 				url: input.data.url,
 				spaces: input.data.spaces,
 				user: input.userId,
